@@ -1380,7 +1380,7 @@ static void raydium_ts_do_suspend(void)
 
 	if (g_u8_raw_data_type == 0)
 		g_u8_resetflag = false;
-	if (g_raydium_ts->is_suspend == 1) {
+	if (g_raydium_ts->is_suspend == 1 && (pm_suspend_via_firmware() == false)) {
 		LOGD(LOG_WARNING, "[touch]Already in suspend state\n");
 		return;
 	}
