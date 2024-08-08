@@ -31,6 +31,8 @@
 #include <linux/gpio.h>
 #include <linux/kthread.h>
 #include <linux/suspend.h>
+#include <glink_interface.h>
+#include <linux/remoteproc/qcom_rproc.h>
 #include "pt_regs.h"
 #if defined(CONFIG_PANEL_NOTIFIER)
 #include <linux/soc/qcom/panel_event_notifier.h>
@@ -74,16 +76,20 @@ enum core_states {
 static int pt_enable_i2c_regulator(struct pt_core_data *cd, bool en);
 #endif
 
+#define PT_AMBIENT_MODE
+
+#ifdef PT_AMBIENT_MODE
 static int pt_device_exit(struct i2c_client *client);
 int pt_device_entry(struct device *dev,
 		u16 irq, size_t xfer_buf_size);
+#endif
 
 static const char *pt_driver_core_name = PT_CORE_NAME;
 static const char *pt_driver_core_version = PT_DRIVER_VERSION;
 static const char *pt_driver_core_date = PT_DRIVER_DATE;
 enum core_states pt_core_state = STATE_NONE;
 
-
+uint32_t pt_slate_resp_ack;
 struct pt_hid_field {
 	int report_count;
 	int report_size;
@@ -10816,6 +10822,7 @@ static int pt_core_suspend(struct device *dev)
 				"%s: Error on disabling i2c regulator\n", __func__);
 	}
 	pt_debug(cd->dev, DL_INFO, "%s Suspend exit - rc = %d\n", __func__, rc);
+
 	return rc;
 }
 
@@ -15053,13 +15060,21 @@ static ssize_t pt_pip2_gpio_read_show(struct device *dev,
  * PARAMETERS:
  *      *client - pointer to i2c client structure
  ******************************************************************************/
+#ifdef PT_AMBIENT_MODE
 static int pt_device_exit(struct i2c_client *client)
 {
 
 		struct pt_core_data *cd = i2c_get_clientdata(client);
 		struct device *dev = cd->dev;
 
+		void *glink_pt_send_msg;
+		int glink_touch_enter = TOUCH_ENTER;
+
 		pt_debug(dev, DL_INFO,"%s: Start pt_device_exit\n", __func__);
+
+		glink_pt_send_msg = &glink_touch_enter;
+		pt_debug(dev, DL_INFO, "[touch]glink_pt_send_msg = %0x\n", glink_pt_send_msg);
+		glink_touch_tx_msg(glink_pt_send_msg, TOUCH_MSG_SIZE);
 
 		if (active_panel)
 			panel_event_notifier_unregister(cd->entry);
@@ -15078,10 +15093,9 @@ static int pt_device_exit(struct i2c_client *client)
 		cancel_work_sync(&cd->suspend_work);
 
 		pt_stop_wd_timer(cd);
-
 		device_init_wakeup(dev, 0);
-
 		disable_irq_nosync(cd->irq);
+
 		if (cd->cpdata->setup_irq)
 			cd->cpdata->setup_irq(cd->cpdata, PT_MT_IRQ_FREE, dev);
 
@@ -15094,6 +15108,7 @@ static int pt_device_exit(struct i2c_client *client)
 		pt_debug(dev, DL_INFO,"%s: End pt_device_exit \n", __func__);
 		return 0;
 }
+#endif
 
 /*******************************************************************************
  * FUNCTION: pt_touch_offload_store
@@ -15163,6 +15178,29 @@ exit:
 	if (rc)
 		return rc;
 	return size;
+}
+
+/*******************************************************************************
+ * FUNCTION: pt_touch_offload_show
+ *
+ * SUMMARY: The show method for the touch_offload sysfs node that allows the TTDL
+ * 			 to verify touch offload enable or disabled.
+ *
+ * RETURN: size of data written to sysfs node
+ *
+ * PARAMETERS:
+ * 			*dev  - pointer to device structure
+ *			*attr - pointer to device attributes
+ *			*buf  - pointer to print output buffer
+ ******************************************************************************/
+static ssize_t pt_touch_offload_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct pt_core_data *cd = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PT_MAX_PRBUF_SIZE,
+			"Touch offload   : %s\n",
+			(cd->touch_offload)? "Enabled" : "Disabled");
 }
 
 /*******************************************************************************
@@ -17558,7 +17596,7 @@ static struct device_attribute attributes[] = {
 	__ATTR(get_param, 0644,
 		pt_get_param_show, pt_get_param_store),
 	__ATTR(pt_touch_offload, 0644,
-		NULL, pt_touch_offload_store),
+		pt_touch_offload_show, pt_touch_offload_store),
 #ifdef EASYWAKE_TSG6
 	__ATTR(easy_wakeup_gesture, 0644, pt_easy_wakeup_gesture_show,
 		pt_easy_wakeup_gesture_store),
@@ -17711,6 +17749,32 @@ err_pinctrl_lookup:
 err_pinctrl_get:
 	cd->ts_pinctrl = NULL;
 	return retval;
+}
+
+void touch_notify_glink_pt_channel_state(bool state)
+{
+	pr_info("%s:[touch] touch_notify_glink\n", __func__);
+}
+
+void glink_touch_pt_rx_msg(void *data, int len)
+{
+	int rc = 0;
+	pr_info("%s: TOUCH_RX_MSG Start:\n", __func__);
+
+	if (len > TOUCH_GLINK_INTENT_SIZE) {
+		pr_err("Invalid TOUCH glink intent size\n");
+		return;
+	}
+	/* check SLATE response */
+	pt_slate_resp_ack = *(uint32_t *)&data[8];
+	if (pt_slate_resp_ack == 0x01) {
+			pr_err("Bad SLATE response\n");
+			rc = -EINVAL;
+			goto err_ret;
+	}
+	pr_info("%s: TOUCH_RX_MSG End:\n", __func__);
+err_ret:
+return;
 }
 
 /*******************************************************************************
@@ -17936,6 +18000,8 @@ int pt_probe(const struct pt_bus_ops *ops, struct device *dev,
 	 * in ttdl_restart function
 	 */
 	cd->bus_ops = ops;
+
+	glink_touch_channel_init(&touch_notify_glink_pt_channel_state, &glink_touch_pt_rx_msg);
 
 	/*
 	 * When the IRQ GPIO is not direclty accessible and no function is
@@ -18234,6 +18300,7 @@ error_no_pdata:
  * PARAMETERS:
  *      *dev  - pointer to core device
  ******************************************************************************/
+#ifdef PT_AMBIENT_MODE
 int pt_device_entry(struct device *dev,
 				u16 irq, size_t xfer_buf_size)
 {
@@ -18241,12 +18308,20 @@ int pt_device_entry(struct device *dev,
 		struct pt_platform_data *pdata = dev_get_platdata(dev);
 		struct i2c_client *client = to_i2c_client(dev);
 		int rc = 0;
+		void *glink_pt_send_msg;
+		int glink_touch_exit = TOUCH_EXIT;
 
 		pt_debug(dev, DL_INFO, "%s: Start pt_device_entry\n", __func__);
 
 		cd->dev  	= dev;
 		cd->pdata   = pdata;
 		cd->cpdata  = pdata->core_pdata;
+
+		glink_pt_send_msg = &glink_touch_exit;
+		pt_debug(dev, DL_INFO, "[touch]glink_pt_send_msg = %d\n", glink_pt_send_msg);
+		glink_touch_tx_msg(glink_pt_send_msg, TOUCH_MSG_SIZE);
+
+		msleep(150);
 
 		if (!rc && cd->ts_pinctrl) {
 				/*
@@ -18376,6 +18451,8 @@ pt_error_detect:
 			cd->cpdata->setup_power(cd->cpdata, PT_MT_POWER_OFF, dev);
 		return rc;
 }
+#endif
+
 EXPORT_SYMBOL_GPL(pt_probe);
 
 /*******************************************************************************
