@@ -2612,7 +2612,8 @@ static int fts_lock_scan_mode(int mode)
 static int fts_set_report_rate(struct fts_ts_info *info, u32 rate)
 {
 	int res = 0;
-	u8 rate_cmd[3] = { 0xC0, 0x20, 0x00 };
+	u8 rate_cmd[10] = { 0xC0, 0x05, 0x00, 0x00, 0x64,
+			    0x0F, 0x02, 0x0F, 0x01, 0x04 };
 
 	if (!info->enable_touch_raw)
 		return res;
